@@ -32,4 +32,22 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // Test files consume values that are `any` by design — supertest's
+    // `res.body`, jest mock returns, ffprobe's parsed JSON. The type-aware
+    // `no-unsafe-*` rules fire on every assertion against them, which drowns
+    // out real findings without catching anything a test would not catch first.
+    //
+    // Production code keeps all of these rules at full strength, and
+    // `npx tsc --noEmit` still type-checks the test files themselves.
+    files: ['**/*.spec.ts', '**/*.integration-spec.ts', '**/*.e2e-spec.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/unbound-method': 'off',
+    },
+  },
 );

@@ -8,8 +8,9 @@ import {
 import { User } from '../users/entities/user.entity';
 import { ChannelsService } from './channels.service';
 import { Channel } from './entities/channel.entity';
+import { Video } from '../videos/entities/video.entity';
 
-const ALL_ENTITIES = [User, Channel, RefreshToken, VerificationToken];
+const ALL_ENTITIES = [User, Channel, RefreshToken, VerificationToken, Video];
 
 describe('ChannelsService (integration)', () => {
   let dataSource: DataSource;
@@ -87,6 +88,43 @@ describe('ChannelsService (integration)', () => {
 
       const channels = await channelRepository.find();
       expect(channels).toHaveLength(2);
+    });
+  });
+
+  describe('findByUserId', () => {
+    it('returns the channel owned by the user', async () => {
+      const user = await createUser();
+      const created = await channelsService.createChannel(
+        user.id,
+        'owner@example.com',
+      );
+
+      const found = await channelsService.findByUserId(user.id);
+
+      expect(found?.id).toBe(created.id);
+      expect(found?.nickname).toBe(created.nickname);
+    });
+
+    it('returns null when the user has no channel', async () => {
+      const user = await createUser();
+
+      await expect(channelsService.findByUserId(user.id)).resolves.toBeNull();
+    });
+
+    it('returns null for a user id that does not exist', async () => {
+      await expect(
+        channelsService.findByUserId('00000000-0000-0000-0000-000000000000'),
+      ).resolves.toBeNull();
+    });
+
+    it('does not eagerly load the user relation', async () => {
+      const user = await createUser();
+      await channelsService.createChannel(user.id, 'lazy@example.com');
+
+      const found = await channelsService.findByUserId(user.id);
+
+      expect(found).not.toBeNull();
+      expect(found!.user).toBeUndefined();
     });
   });
 });
