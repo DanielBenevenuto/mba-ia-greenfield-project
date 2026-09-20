@@ -48,3 +48,67 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class ChannelNotFoundException extends DomainException {
+  constructor() {
+    super('CHANNEL_NOT_FOUND', 404, 'No channel is associated with this user');
+  }
+}
+
+export class VideoTooLargeException extends DomainException {
+  constructor(maxBytes: number) {
+    super(
+      'VIDEO_TOO_LARGE',
+      413,
+      `Video exceeds the maximum allowed size of ${maxBytes} bytes`,
+    );
+  }
+}
+
+export class UnsupportedMediaTypeException extends DomainException {
+  constructor(contentType: string) {
+    super(
+      'UNSUPPORTED_MEDIA_TYPE',
+      415,
+      `Content type ${contentType} is not a supported video format`,
+    );
+  }
+}
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class NotVideoOwnerException extends DomainException {
+  constructor() {
+    super('NOT_VIDEO_OWNER', 403, 'Video belongs to another channel');
+  }
+}
+
+export class UploadSessionNotOpenException extends DomainException {
+  constructor() {
+    super(
+      'UPLOAD_SESSION_NOT_OPEN',
+      409,
+      'No open upload session for this video',
+    );
+  }
+}
+
+export class VideoNotReadyException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_READY', 409, 'Video is not ready for playback yet');
+  }
+}
+
+export class InvalidRangeException extends DomainException {
+  constructor() {
+    super(
+      'INVALID_RANGE',
+      416,
+      'Requested range is malformed or unsatisfiable',
+    );
+  }
+}
