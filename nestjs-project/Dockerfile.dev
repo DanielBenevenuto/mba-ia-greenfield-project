@@ -1,9 +1,13 @@
 FROM node:25.6.0-slim
 
-RUN apt update && apt install -y procps curl
+# ffmpeg ships both `ffmpeg` and `ffprobe`. The video worker needs them to read
+# metadata and extract the thumbnail frame; the API container needs them too
+# because it runs the extractor's integration tests and generates the video
+# fixture used by the suite.
+RUN apt update && apt install -y procps curl ffmpeg
 
 WORKDIR /home/node/app
 
 USER node
 
-CMD [ "tail", "-f", "/dev/null" ] 
+CMD [ "tail", "-f", "/dev/null" ]
