@@ -1,7 +1,23 @@
 # phase-03-videos — Progress
 
-**Status:** in_progress
+**Status:** completed
 **SIs:** 13/13 completed
+
+**Definition of Done (verified 2026-09-20):**
+
+| Check | Command | Result |
+|---|---|---|
+| Type-check | `npx tsc --noEmit` | exit 0 |
+| Lint | `npm run lint` | exit 0 (0 errors, 45 pre-configured warnings) |
+| Unit + integration | `npm test -- --runInBand` | 260 passed / 37 suites |
+| E2E | `npm run test:e2e` | 79 passed / 5 suites |
+| Re-runnability | full suite twice against the same DB | green both times |
+
+**Follow-ups for a future phase (out of Phase 03 scope):**
+
+- Abandoned upload sessions are recoverable but not reaped automatically: a video left in `draft` with a non-null `upload_id` keeps its multipart session open in storage. A scheduled cleanup (or an S3 lifecycle rule on incomplete multipart uploads) belongs with the management panel in Fase 04.
+- There is no endpoint to reprocess a video stuck in `failed`; today it requires re-enqueuing the job manually. The processor is already idempotent, so this is a thin endpoint when Fase 04 adds the management surface.
+- `S3_PUBLIC_ENDPOINT` defaults to the Compose hostname, which is right for container-to-container use and for the test suite. A browser running on the host needs it pointed at `http://localhost:9000`; this becomes relevant when the Fase 04/05 frontend consumes presigned URLs directly.
 
 ### SI-03.1 — Instalar dependências e criar configuração de storage e fila
 - **Status:** completed
