@@ -13,6 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** `docker compose ps minio` — expect status `healthy`; the one-shot `minio-init` service must have exited `0` after creating the bucket
+
+Note that `video-worker` is **not** an idle container: unlike `nestjs-api`, it runs its process on `up` and starts consuming the queue immediately.
 
 Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
 
@@ -34,6 +38,13 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP capture, SMTP `1025`, web UI/API `8025`
+- `minio` — S3-compatible object storage, API `9000`, console `9001`, user/password `streamtube`
+- `minio-init` — one-shot `mc` container that creates the bucket (idempotent; exits `0`)
+- `redis` — Redis 8, port `6379`, broker for the BullMQ video-processing queue
+- `video-worker` — consumes the video queue; same image and source tree as `nestjs-api`, started from `src/worker.main.ts`
+
+The images are pinned to Quay (`quay.io/minio/minio`, `quay.io/minio/mc`) because the `minio/minio` repository is no longer pullable from Docker Hub.
 
 All verification and teardown commands run on the **host machine**:
 
@@ -63,6 +74,11 @@ npm run start:dev                        # Dev server with hot-reload
 npm run build                            # Compile to dist/
 npm run start:prod                       # Run compiled build
 
+npm run start:worker                     # Video worker (one-shot run)
+npm run start:worker:dev                 # Video worker with hot-reload — what the
+                                         # video-worker Compose service runs
+npm run start:worker:prod                # Video worker from the compiled build
+
 npm test                                 # Unit tests
 npm run test:watch                       # Unit tests in watch mode
 npm run test:cov                         # Coverage report
@@ -78,7 +94,9 @@ npm run format                           # Prettier formatting
 ```bash
 docker compose ps
 docker compose logs nestjs-api
+docker compose logs video-worker
 docker compose exec db pg_isready -U streamtube
+docker compose exec redis redis-cli ping
 curl http://localhost:3000
 ```
 
@@ -148,6 +166,30 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+### Two processes, one codebase
+
+`src/main.ts` boots the HTTP API (`AppModule`); `src/worker.main.ts` boots the video worker (`WorkerModule`) as an application context with **no HTTP server**. They share entities, config and the storage service instead of duplicating them.
+
+Only the worker registers `VideoProcessor` — the API produces jobs and never consumes them. Keep it that way: putting the processor in `AppModule` would let a long ffmpeg run block the request loop.
+
+`WorkerModule` registers `Video`, `Channel` and `User` in `TypeOrmModule.forFeature`. `autoLoadEntities` only discovers what `forFeature` declares, and TypeORM needs the whole relation closure of `Video`, otherwise startup fails with `Entity metadata for Video#channel was not found`.
+
+### Video module layout
+
+```
+src/storage/          StorageService — S3/MinIO adapter (multipart, ranges, presigned URLs)
+src/videos/
+  videos.controller.ts   upload handshake + public playback endpoints
+  videos.service.ts      draft pre-registration, upload session, playback resolution
+  public-id.util.ts      11-char base62 public identifier
+  range.util.ts          HTTP Range header parsing for 206 responses
+  video.constants.ts     status enum, size ceiling, content-type allowlist, queue names
+  entities/video.entity.ts
+  processing/
+    video-metadata.extractor.ts   ffprobe/ffmpeg wrappers
+    video.processor.ts            BullMQ consumer (worker process only)
+```
 
 ## Code Conventions
 

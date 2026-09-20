@@ -37,89 +37,137 @@ How each external system is handled in tests. These strategies were confirmed wi
 
 ---
 
-## Object Storage — Local Filesystem
+## Object Storage — MinIO (Real, Docker)
 
-**Strategy:** Local filesystem storage in development and tests. S3 in production.
+**Strategy:** real S3-compatible storage via the Docker `minio` service. MinIO locally, S3 in production — only environment variables change.
 
-**Approach:**
-- The storage layer should use an abstraction (e.g., `StorageService` interface) that allows switching between local filesystem and S3
-- In tests, use the local filesystem adapter — no mocking needed
-- Use a temporary directory for test uploads: `os.tmpdir()` or a dedicated `test-uploads/` directory
-- Clean up test files in `afterAll`
+> Phase 03 replaced the previous local-filesystem strategy. Presigned multipart upload has no filesystem equivalent, and it is the riskiest surface of the upload feature (signatures, ETags, part ordering, Range reads) — mocking it would hide exactly the failures these tests exist to catch.
 
-**Setup pattern:**
+**Compose services:**
+
+```yaml
+minio:
+  image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+  command: server /data --console-address ":9001"
+  ports: ["9000:9000", "9001:9001"]
+  environment:
+    - MINIO_ROOT_USER=streamtube
+    - MINIO_ROOT_PASSWORD=streamtube
+```
+
+A one-shot `minio-init` service (`quay.io/minio/mc`) creates the bucket with `mc mb --ignore-existing`, so repeated `docker compose up` is safe.
+
+**Connection config for tests** — build the service straight from the config factory, no DI container needed:
+
 ```typescript
-// In test module setup
-{
-  provide: 'STORAGE_CONFIG',
-  useValue: {
-    driver: 'local',
-    basePath: path.join(os.tmpdir(), 'streamtube-test-uploads'),
-  },
-}
+import storageConfig from '../config/storage.config';
+import { StorageService } from '../storage/storage.service';
+
+const storage = new StorageService(storageConfig());
+```
+
+**Test isolation:** object keys are namespaced by a random `videoId` (`videos/{uuid}/source/...`), so suites never collide and there is nothing to clean between tests.
+
+**Presigned-URL gotcha.** SigV4 signs the `Host` header. URLs are signed against `S3_PUBLIC_ENDPOINT`, which in a real deployment is a hostname reachable from outside the Compose network — and therefore may not resolve inside the `nestjs-api` container where tests run. Use the helper:
+
+```typescript
+import { putPart, toInternalUrl } from '../test/storage-test-utils';
+
+const etag = await putPart(presignedUrl, buffer); // rewrites host, PUTs, returns the ETag
+const res = await fetch(toInternalUrl(presignedDownloadUrl));
+```
+
+**Video fixtures: generate them, do not commit them.**
+
+```typescript
+import { createVideoFixture } from '../test/video-fixture';
+
+const fixture = await createVideoFixture(3, 320, 240); // ffmpeg testsrc → { buffer, ... }
 ```
 
 **Integration test:**
+
 ```typescript
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-
 describe('StorageService (integration)', () => {
-  const testDir = path.join(os.tmpdir(), 'streamtube-test-uploads');
+  it('should upload an object in two presigned parts', async () => {
+    const uploadId = await storage.createMultipartUpload(key, 'video/mp4');
+    const urls = await storage.presignUploadPartUrls(key, uploadId, 2);
 
-  afterAll(() => {
-    fs.rmSync(testDir, { recursive: true, force: true });
-  });
+    const etag1 = await putPart(urls[0].url, Buffer.alloc(5 * 1024 * 1024, 1));
+    const etag2 = await putPart(urls[1].url, Buffer.alloc(1024, 2));
 
-  it('should upload and retrieve a file', async () => {
-    const buffer = Buffer.from('test content');
-    const key = await storageService.upload(buffer, 'test.txt');
+    await storage.completeMultipartUpload(key, uploadId, [
+      { part_number: 1, etag: etag1 },
+      { part_number: 2, etag: etag2 },
+    ]);
 
-    const retrieved = await storageService.get(key);
-    expect(retrieved.toString()).toBe('test content');
+    const head = await storage.headObject(key);
+    expect(head.contentLength).toBe(5 * 1024 * 1024 + 1024);
   });
 });
 ```
 
 ---
 
-## Message Queue — Real (Docker)
+## Message Queue — BullMQ + Redis (Real, Docker)
 
-**Strategy:** Real message broker in Docker. The specific technology is TBD per the architecture diagram (likely BullMQ with Redis or RabbitMQ).
+**Strategy:** real broker via the Docker `redis` service. The technology is no longer TBD — Phase 03 decided it (`phase-03-videos/TD-02`): BullMQ over Redis, through `@nestjs/bullmq`.
 
-**When the queue technology is chosen, configure:**
-- A queue broker service in `compose.yaml` (e.g., Redis for BullMQ, RabbitMQ for AMQP)
-- Test isolation: use dedicated test queues or clean queues between tests
-- For publisher tests: assert the job is enqueued with correct data
-- For consumer tests: submit a job and assert the processing outcome
+**Version constraint (do not "upgrade" past it):** `@nestjs/bullmq@12` is published ESM-only and cannot be required from this CommonJS project. Pin `@nestjs/bullmq@^11.0.5` (CJS, and its peer range already accepts `bullmq ^6`). `ioredis` is an **optional** peer of BullMQ 6 and must be installed explicitly.
 
-**Setup pattern (BullMQ example):**
-```typescript
-// In test module
-BullModule.forRoot({
-  connection: {
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: Number(process.env.REDIS_PORT ?? 6379),
-  },
-}),
-BullModule.registerQueue({ name: 'video-processing' }),
+**Compose service:**
+
+```yaml
+redis:
+  image: redis:8-alpine
+  ports: ["6379:6379"]
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
 ```
 
-```typescript
-describe('VideoService (integration - queue)', () => {
-  it('should enqueue a processing job on upload', async () => {
-    await videoService.upload(videoData);
+**Producer test** — construct a real `Queue` and read the job back:
 
-    const queue = module.get<Queue>(getQueueToken('video-processing'));
-    const jobs = await queue.getJobs(['waiting']);
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0].data).toEqual(
-      expect.objectContaining({ videoId: expect.any(String) }),
-    );
-  });
+```typescript
+import { Queue } from 'bullmq';
+import queueConfig from '../config/queue.config';
+
+const qc = queueConfig();
+const queue = new Queue('video-processing', {
+  connection: { host: qc.host, port: qc.port },
+});
+
+beforeEach(async () => {
+  // Redis is shared across runs — start each test from an empty queue.
+  await queue.obliterate({ force: true }).catch(() => undefined);
+});
+afterAll(async () => {
+  await queue.close();
+});
+
+it('should enqueue a processing job on upload completion', async () => {
+  await videosService.completeUpload(userId, videoId, uploadId, parts);
+
+  const jobs = await queue.getJobs(['waiting', 'delayed', 'prioritized']);
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0].data).toEqual({ videoId });
+  expect(jobs[0].opts.attempts).toBe(3);
 });
 ```
+
+Inside a Nest testing module, resolve the same queue with `getQueueToken('video-processing')`.
+
+**Consumer test** — call the processor directly with a stub `Job` instead of racing the worker container; the transport itself is already covered by the producer test.
+
+```typescript
+const processor = new VideoProcessor(videoRepository, storage, extractor);
+await processor.process({ data: { videoId } } as never);
+```
+
+---
+
+## ffmpeg / ffprobe — Real (installed in the image)
+
+`Dockerfile.dev` installs `ffmpeg`, so both `nestjs-api` (which runs the tests) and `video-worker` have `ffmpeg` and `ffprobe` available. Extractor tests run the real binaries against a real presigned URL — that combination is what proves a large source is read over HTTP Range instead of being downloaded to disk.
 
 ---
 

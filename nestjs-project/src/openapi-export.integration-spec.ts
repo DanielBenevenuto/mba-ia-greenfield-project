@@ -128,4 +128,80 @@ describe('exportSpec (integration)', () => {
       }
     }
   });
+
+  it('documents every Phase 03 video endpoint', () => {
+    const paths = document.paths as Record<
+      string,
+      Record<string, Record<string, unknown>>
+    >;
+
+    const expected: [string, string][] = [
+      ['/videos/uploads', 'post'],
+      ['/videos/{id}/uploads/{uploadId}/complete', 'post'],
+      ['/videos/{id}/uploads/{uploadId}', 'delete'],
+      ['/videos/{publicId}', 'get'],
+      ['/videos/{publicId}/stream', 'get'],
+      ['/videos/{publicId}/download', 'get'],
+    ];
+
+    for (const [path, method] of expected) {
+      expect(paths[path]?.[method]).toBeDefined();
+      expect(typeof paths[path][method].summary).toBe('string');
+    }
+  });
+
+  it('documents the video upload error statuses against the shared error envelope', () => {
+    const paths = document.paths as Record<
+      string,
+      Record<string, Record<string, unknown>>
+    >;
+    const operation = paths['/videos/uploads'].post;
+    const responses = operation.responses as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    for (const status of ['400', '401', '404', '413', '415']) {
+      const response = responses[status];
+      expect(response).toBeDefined();
+      const content = response.content as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const schema = content['application/json'].schema as Record<
+        string,
+        unknown
+      >;
+      expect(schema['$ref']).toBe('#/components/schemas/ApiErrorEnvelope');
+    }
+  });
+
+  it('marks the playback endpoints as public and the upload endpoints as protected', () => {
+    const paths = document.paths as Record<
+      string,
+      Record<string, Record<string, unknown>>
+    >;
+
+    const uploadSecurity = paths['/videos/uploads'].post.security as Array<
+      Record<string, unknown>
+    >;
+    expect(uploadSecurity.some((req) => 'access-token' in req)).toBe(true);
+
+    // Public routes must not advertise a bearer requirement.
+    expect(paths['/videos/{publicId}'].get.security).toBeUndefined();
+    expect(paths['/videos/{publicId}/stream'].get.security).toBeUndefined();
+    expect(paths['/videos/{publicId}/download'].get.security).toBeUndefined();
+  });
+
+  it('documents 206 Partial Content on the streaming endpoint', () => {
+    const paths = document.paths as Record<
+      string,
+      Record<string, Record<string, unknown>>
+    >;
+    const responses = paths['/videos/{publicId}/stream'].get
+      .responses as Record<string, unknown>;
+
+    expect(responses['206']).toBeDefined();
+    expect(responses['416']).toBeDefined();
+  });
 });

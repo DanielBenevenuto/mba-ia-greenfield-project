@@ -37,7 +37,7 @@ NestJS's DI container makes testing natural — `Test.createTestingModule()` let
 - Services with branching logic (e.g., conditional flows for registration, login, password reset)
 - Entity constraints and defaults — unique indexes, `select: false` fields, `@CreateDateColumn` behavior, cascade rules
 - Service-to-database contracts — repository queries, TypeORM relation loading, transaction boundaries
-- Service-to-external-system contracts — local storage uploads, SMTP sends via Mailpit, queue publishing
+- Service-to-external-system contracts — object storage uploads via MinIO, SMTP sends via Mailpit, queue publishing via BullMQ/Redis
 - Module DI wiring — every module with configured imports (`TypeOrmModule.forFeature()`, `JwtModule.register()`, `BullModule.registerQueue()`)
 - Guard authorization logic — role checks, ownership verification, token validation flows
 - Exception filter error mapping — domain exceptions to HTTP responses
