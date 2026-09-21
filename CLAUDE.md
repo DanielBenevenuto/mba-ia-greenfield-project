@@ -23,7 +23,7 @@ See `docs/diagrams/software-arch.mermaid` for the full diagram. Key containers:
 - **Video Worker** (FFmpeg) → consumes jobs from queue, processes videos, updates DB and storage
 - **Database** (PostgreSQL) → users, channels, videos, comments, likes
 - **Object Storage** (S3/MinIO) → video files and thumbnails
-- **Message Queue** (TBD) → video processing job queue
+- **Message Queue** (BullMQ + Redis) → video processing job queue
 - **Email Service** (SMTP) → account confirmation and password recovery
 
 ## Docker Networking
@@ -36,6 +36,56 @@ Inside a container, `localhost` refers to the container itself, not the host mac
 - **Wrong:** `DB_HOST=localhost`
 
 This applies to all environment variables, configuration files, and code that references service hosts.
+
+## Videos (Phase 03)
+
+Upload, background processing and playback live in `nestjs-project/src/videos/`, with the object-storage adapter in `nestjs-project/src/storage/`. Full decision record: [docs/decisions/technical-decisions-phase-03-videos.md](docs/decisions/technical-decisions-phase-03-videos.md); plan: [docs/phases/phase-03-videos/phase-03-videos.md](docs/phases/phase-03-videos/phase-03-videos.md).
+
+### Upload never passes through the API
+
+A single S3 `PUT` caps at 5GB, so the 10GB requirement is met with **multipart upload + one presigned URL per part**. The handshake is three steps:
+
+1. `POST /videos/uploads` — pre-registers the video as a **draft**, opens the multipart session and returns `upload_id` plus one presigned URL per part.
+2. The client `PUT`s each part **straight to object storage**. The bytes never reach this API.
+3. `POST /videos/{id}/uploads/{uploadId}/complete` — sends the parts' ETags, closes the multipart, flips the video to `processing` and enqueues the job. `DELETE /videos/{id}/uploads/{uploadId}` aborts instead.
+
+### Video status lifecycle
+
+`draft` → `processing` → `ready` | `failed`, persisted on `videos.status`. Jobs retry three times with exponential backoff; only after the last attempt fails does the video move to `failed`, with the reason stored in `videos.processing_error`. The source object is kept so the video stays auditable and can be reprocessed.
+
+### Endpoints
+
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/videos/uploads` | authenticated |
+| POST | `/videos/{id}/uploads/{uploadId}/complete` | owner channel |
+| DELETE | `/videos/{id}/uploads/{uploadId}` | owner channel |
+| GET | `/videos/{publicId}` | public when `ready`, else owner only |
+| GET | `/videos/{publicId}/stream` | public when `ready`, else owner only |
+| GET | `/videos/{publicId}/download` | public when `ready`, else owner only |
+
+A video that is not `ready` answers `404` to anyone but its owning channel, so the endpoint does not leak its existence; the owner gets `409 VIDEO_NOT_READY`.
+
+### Unique URL
+
+Each video gets an 11-character base62 `public_id` generated with `node:crypto` (`src/videos/public-id.util.ts`) and backed by a unique index — that index, not the odds, is the guarantee of "never conflicts". `nanoid` is deliberately **not** used: it is ESM-only and this project builds as CommonJS.
+
+### Streaming vs download
+
+- **Streaming** (`/stream`) is proxied by the API: it forwards the `Range` header to storage and answers `206 Partial Content` with `Content-Range`, piping the stream so memory stays flat. Playback starts without downloading the whole file, and authorization is re-checked on every request.
+- **Download** (`/download`) answers `302` to a short-lived presigned URL carrying `Content-Disposition: attachment`. The bulk transfer is offloaded to storage.
+
+### Queue and worker
+
+BullMQ over Redis (`@nestjs/bullmq`). The API only **produces** jobs; the `video-worker` Compose service is the only **consumer**, running the same codebase from a different entrypoint (`src/worker.main.ts` + `src/worker.module.ts`) so ffmpeg never competes with the HTTP event loop. Job `process-video` on queue `video-processing` carries only `{ videoId }` — the worker re-reads the row, which makes redelivery idempotent.
+
+The worker feeds a **presigned URL** to `ffprobe`/`ffmpeg` instead of a local path, so even a 10GB source is read over HTTP Range and never lands on the worker's disk.
+
+### Object storage
+
+One bucket, prefixed keys: `videos/{videoId}/source/{filename}` and `thumbnails/{videoId}/poster.jpg`. MinIO locally, S3 in production — only env vars change.
+
+**Two endpoints, deliberately.** `S3_ENDPOINT` is used for server-to-server calls and must be the Compose service name (`http://minio:9000`). `S3_PUBLIC_ENDPOINT` is used **only** to sign URLs handed to clients; SigV4 signs the Host header, so a URL signed with the internal endpoint is rejected when the caller resolves a different host. Set it to a host-reachable address (e.g. `http://localhost:9000`) when a browser outside the Compose network must follow the presigned URLs.
 
 ## Working Principles
 
